@@ -162,7 +162,74 @@ class TransformerEncoder(nn.Module):
 
         return self.final_norm(h)
 
+class TransformerDecoderBlock(nn.Module):
+    def __init__(self,args:Dict):
+        super().__init__()
+        self.self_attention=MultiHeadAttention(args)
+        self.cross_attention=MultiHeadAttention(args)
+        self.feed_forward=FeedForward(dim=args.dim,hidden_dim=4*args.dim,dropout=args.dropout)
+        self.self_attention_norm=nn.LayerNorm(args.dim)
+        self.cross_attention_norm=nn.LayerNorm(args.dim)
+        self.ffn_norm=nn.LayerNorm(args.dim)
+    
+    def forward(self,x:torch.Tensor,encoder_output:torch.Tensor):
+        h = x + self.self_attention(self.self_attention_norm(x))
+        h = h + self.cross_attention(self.cross_attention_norm(h),encoder_output)
+        out = h + self.feed_forward(self.ffn_norm(h))
+        return out
+    
+class TransformerDecoder(nn.Module):
+    def __init__(self,args:Dict):
+        super().__init__()
+        self.token_embedding=nn.Embedding(args.vocab_size,args.dim)
+        self.resgister_buffer('pos_embedding',get_sinusoid_encoding_table(args.max_seq_length,args.dim))
+        self.layers=nn.ModuleList(TransformerDecoderBlock(args) for _ in range(args.n_layers))
+        self.final_norm=nn.LayerNorm(args.dim)
+        self.dropout=nn.Dropout(args.dropout)
+
+    def forward(self,encoder_output:torch.Tensor,tgt_tokens:torch.Tensor):
+        token_embedding=self.token_embedding(tgt_tokens)
+        h=self.drouput(token_embedding)+self.pos_embedding[:tgt_tokens.size(1),:]
+        for layer in self,layers:
+            h=layer(h,encoder_output)
+        return self.final_norm(h)
+
+
 class Transformer(nn.module):
     """完整的transformer模型"""
     def __init__(self,args:Dict):
+        super().__init__()
+        #编码器
+        self.encoder=TransformerEncoder(args)
+        #解码器
+        self.decoder=TransformerDecoder(args)
+        #输出层
+        self.outproj=nn.Linear(args.dim,args.vocab_size,bias=False)
+
+        #初始化权重
+        self.apply(self._init_weights)
+
+    def _init_weights(self,module):
+        if isinstance(module,(nn.Linear,nn.Embedding)):
+            torch.nn.init.normal_(module.weight,mean=0.0,std=0.02)
+            if isinstance(module,nn.Linear) and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
         
+
+    def forward(self,src_tokens:torch.tensor,tgt_tokens:torch.tensor):
+        """
+        Args:
+            src_tokens: [batch_size,src_seq_len]
+            tgt_tokens: [batch_size,tgt_seq_len]
+        Returns:
+            output: [batch_size,tgt_seq_len,vocab_size]
+        """
+        #编码器前向传播
+        src_tokens=self.encoder(src_tokens)
+        #解码器前向传播
+        tgt_tokens=self.decoder(src_tokens,tgt_tokens)
+        #输出层
+        output=self.outproj(tgt_tokens)
+        #返回输出   
+        return output
+
