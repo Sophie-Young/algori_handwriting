@@ -21,7 +21,6 @@ def get_rotary_frequencies(dim:int,seq_len:int,theta:float=10000.0):
 
     return angles
 
-
 def get_rotary_embedding(dim:int,seq_len:int,theta:float=10000.0):
     """
         预计算RoPE的sin和cos的值

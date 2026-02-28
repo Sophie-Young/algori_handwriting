@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import math
 from typing import Dict,Optional
 import numpy as np
-
+from position_encoding.RoPE import RotaryPositionEmbedding
 
 def get_sinusoid_encoding_table(max_length,d_model):
     """
@@ -112,7 +112,58 @@ class MultiHeadAttention(nn.Module):
         output=output.transpose(1,2).contiguous().view(batch_size,seq_len,-1)
 
         return self.residual_dropout(self.output_proj(output))
-    
+
+
+#交叉注意力 的 x 和 encoder_output不在同一个坐标系下 因此不应该使用位置编码
+class MultiHeadAttentionwithRoPE(nn.Module):
+    def __init__(self,args:Dict):
+        super().__init__()
+
+        self.n_heads=args.n_heads
+        self.head_dim=args.head_dim
+
+        self.dropout=args.dropout
+        self.q_proj=nn.Linear(args.dim,args.head_dim*args.n_heads,bias=False)
+        self.k_proj=nn.Linear(args.dim,args.head_dim*args.n_heads,bias=False)
+        self.v_proj=nn.Linear(args.dim,args.head_dim*args.n_heads,bias=False)
+        self.output_proj=nn.Linear(args.head_dim*args.n_heads,args.dim,bias=False)
+        self.register_buffer("rope_cache",RotaryPositionEmbedding(args.max_len,args.dim))
+        
+        attn_mask=torch.full((1,1,args.max_len,args.max_len),float("-inf"))
+        self.register_buffer("attn_mask",torch.triu(attn_mask,diagonal=1),persistent=False)
+
+        self.attn_dropout=nn.Dropout(self.dropout)
+        self.residual_dropout=nn.Dropout(args.dropout)
+
+    def forward(self,x:torch.Tensor,encoder_output:Optional[torch.Tensor]=None):
+        batch_size,seq_len,_=x.shape
+        if encoder_output is None:
+            q=self.q_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
+            k=self.k_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
+            v=self.v_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
+            q,k=self.rope_cache(q,k)
+
+        else:
+            q=self.q_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
+            k=self.k_proj(encoder_output).view(batch_size,-1,self.n_heads,self.head_dim)
+            v=self.v_proj(encoder_output).view(batch_size,-1,self.n_heads,self.head_dim)
+
+        q=q.transpose(1,2)
+        k=k.transpose(1,2)
+        v=v.transpose(1,2)
+
+        attn=torch.matmul(q,k.transpose(2,3))/math.sqrt(self.head_dim)
+
+        if encoder_output is None:
+            attn=attn+self.attn_mask[:,:,:seq_len,:seq_len]
+
+        attn_probs=F.softmax(attn.float(),dim=-1).type_as(q)
+        attn_probs=self.attn_dropout(attn_probs)
+        output=torch.matmul(attn_probs,v)
+        output=output.transpose(1,2).contiguous().view(batch_size,seq_len,-1)
+        return self.residual_dropout(self.output_proj(output))
+
+
 class FeedForward(nn.Module):
     def __init__(self,dim:int,hidden_dim:int,dropout:float):
         super().__init__()
