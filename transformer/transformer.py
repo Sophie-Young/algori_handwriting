@@ -115,7 +115,7 @@ class MultiHeadAttention(nn.Module):
 
 
 #交叉注意力 的 x 和 encoder_output不在同一个坐标系下 因此不应该使用位置编码
-class MultiHeadAttentionwithRoPE(nn.Module):
+class MultiHeadAttentionwithRoPE_KVCache(nn.Module):
     def __init__(self,args:Dict):
         super().__init__()
 
@@ -135,18 +135,36 @@ class MultiHeadAttentionwithRoPE(nn.Module):
         self.attn_dropout=nn.Dropout(self.dropout)
         self.residual_dropout=nn.Dropout(args.dropout)
 
+        self.key_cache,self.value_cache=None,None
+
     def forward(self,x:torch.Tensor,encoder_output:Optional[torch.Tensor]=None):
         batch_size,seq_len,_=x.shape
         if encoder_output is None:
             q=self.q_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
             k=self.k_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
             v=self.v_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
-            q,k=self.rope_cache(q,k)
 
+            start_pos=self.key_cache.shape[1] if self.key_cache is not None else 0
+
+            q,k=self.rope_cache(q,k,start_pos=start_pos)
+
+            if self.key_cache is not None:
+                k=torch.cat([self.key_cache,k],dim=1)
+                v=torch.cat([self.value_cache,v],dim=1)
+            
+            self.key_cache=k
+            self.value_cache=v
         else:
             q=self.q_proj(x).view(batch_size,seq_len,self.n_heads,self.head_dim)
-            k=self.k_proj(encoder_output).view(batch_size,-1,self.n_heads,self.head_dim)
-            v=self.v_proj(encoder_output).view(batch_size,-1,self.n_heads,self.head_dim)
+            if self.key_cache is None:
+                kv_seq_len=encoder_output.shape[1]
+                k=self.k_proj(encoder_output).view(batch_size,kv_seq_len,self.n_heads,self.head_dim)
+                v=self.v_proj(encoder_output).view(batch_size,kv_seq_len,self.n_heads,self.head_dim)
+                self.key_cache = k
+                self.value_cache = v
+            else:
+                k=self.key_cache
+                v=self.value_cache
 
         q=q.transpose(1,2)
         k=k.transpose(1,2)
@@ -155,14 +173,17 @@ class MultiHeadAttentionwithRoPE(nn.Module):
         attn=torch.matmul(q,k.transpose(2,3))/math.sqrt(self.head_dim)
 
         if encoder_output is None:
-            attn=attn+self.attn_mask[:,:,:seq_len,:seq_len]
+            if seq_len>1:
+                attn=attn+self.attn_mask[:,:,:seq_len,:seq_len]
 
         attn_probs=F.softmax(attn.float(),dim=-1).type_as(q)
         attn_probs=self.attn_dropout(attn_probs)
+
         output=torch.matmul(attn_probs,v)
         output=output.transpose(1,2).contiguous().view(batch_size,seq_len,-1)
-        return self.residual_dropout(self.output_proj(output))
 
+        return self.residual_dropout(self.output_proj(output))
+        
 
 class FeedForward(nn.Module):
     def __init__(self,dim:int,hidden_dim:int,dropout:float):
