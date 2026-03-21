@@ -1,0 +1,10 @@
+ce
+mse
+nce
+info_nce
+kl_divergence
+pairwise_loss
+triple_loss
+contrastive_loss
+triplet_loss
+contrastive_loss
